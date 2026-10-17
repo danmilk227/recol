@@ -1,14 +1,20 @@
+//go:build windows
+// +build windows
+
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"image/color"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"unsafe"
 
 	"recol/pkg/imagepkg"
+	"recol/pkg/installpkg"
 )
 
 var (
@@ -57,9 +63,45 @@ func ShowColorPicker() (color.Color, bool) {
 	return color.NRGBA{R: r, G: g, B: b, A: 255}, true
 }
 
+func handleInteractiveMenu() {
+	fmt.Println("=================================")
+	fmt.Println("          recol Setup            ")
+	fmt.Println("=================================")
+	fmt.Println("Please run this executable as Administrator to Install/Uninstall.")
+	fmt.Println()
+	fmt.Println("1. Install (Add to Context Menu)")
+	fmt.Println("2. Uninstall (Remove from Context Menu)")
+	fmt.Println("3. Exit")
+	fmt.Print("\nEnter choice (1/2/3): ")
+
+	reader := bufio.NewReader(os.Stdin)
+	choice, _ := reader.ReadString('\n')
+	choice = strings.TrimSpace(choice)
+
+	switch choice {
+	case "1":
+		fmt.Println("Installing...")
+		if err := installpkg.Install(); err != nil {
+			fmt.Printf("Error during installation: %v\n", err)
+		}
+	case "2":
+		fmt.Println("Uninstalling...")
+		if err := installpkg.Uninstall(); err != nil {
+			fmt.Printf("Error during uninstallation: %v\n", err)
+		}
+	case "3":
+		fmt.Println("Exiting.")
+	default:
+		fmt.Println("Invalid choice.")
+	}
+
+	fmt.Println("Press Enter to exit...")
+	reader.ReadString('\n')
+}
+
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: recol <file_or_directory>")
+		handleInteractiveMenu()
 		return
 	}
 
