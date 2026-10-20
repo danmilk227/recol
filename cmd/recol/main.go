@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Microsoft/go-winio"
 	"recol/pkg/guipkg"
 	"recol/pkg/imagepkg"
 	"recol/pkg/installpkg"
@@ -43,15 +44,15 @@ func main() {
 
 	targetPath := os.Args[1]
 
-	// Multiple file selection workaround via local TCP socket
-	const port = "127.0.0.1:49193" // arbitrary unused port for IPC
+	// Multiple file selection workaround via Named Pipes
+	const pipeName = `\\.\pipe\recol-ipc-pipe`
 
 	var listener net.Listener
 	var err error
 
 	// Try to listen or connect in a loop to handle the race condition of simultaneous launches
 	for i := 0; i < 5; i++ {
-		conn, errDial := net.DialTimeout("tcp", port, 50*time.Millisecond)
+		conn, errDial := winio.DialPipe(pipeName, nil)
 		if errDial == nil {
 			// Server already running, send the path and exit
 			fmt.Fprintf(conn, "%s\n", targetPath)
@@ -59,7 +60,7 @@ func main() {
 			return
 		}
 
-		listener, err = net.Listen("tcp", port)
+		listener, err = winio.ListenPipe(pipeName, nil)
 		if err == nil {
 			break // Successfully became the server
 		}

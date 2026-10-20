@@ -78,6 +78,12 @@ func copyFile(src, dst string) error {
 		return fmt.Errorf("%s is not a regular file", src)
 	}
 
+	// Rename existing target out of the way before copying,
+	// because if we are currently running from there, os.Create will get "Access Denied".
+	if _, err := os.Stat(dst); err == nil {
+		os.Rename(dst, dst+".old")
+	}
+
 	source, err := os.Open(src)
 	if err != nil {
 		return err
@@ -91,6 +97,9 @@ func copyFile(src, dst string) error {
 	defer destination.Close()
 
 	_, err = io.Copy(destination, source)
+
+	// Try to clean up .old if possible, but it might be locked. That's fine.
+	os.Remove(dst + ".old")
 	return err
 }
 

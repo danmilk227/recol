@@ -161,7 +161,18 @@ func PickColorFromScreen(owner *walk.MainWindow) (color.Color, bool) {
 	// Implementing a full transparent overlay in WinAPI is complex.
 	// Instead, we will use a loop polling for GetAsyncKeyState.
 
-	walk.MsgBox(owner, "Пипетка", "Наведите мышь на нужный пиксель на экране и нажмите ПРОБЕЛ.", walk.MsgBoxIconInformation)
+	// Create a non-blocking dialog to instruct the user
+	var dlg *walk.Dialog
+	Dialog{
+		AssignTo: &dlg,
+		Title:    "Пипетка",
+		MinSize:  Size{Width: 300, Height: 100},
+		Layout:   VBox{},
+		Children: []Widget{
+			Label{Text: "Наведите мышь на нужный пиксель на экране и нажмите ПРОБЕЛ.\nДля отмены нажмите ESC."},
+		},
+	}.Create(owner)
+	dlg.Show()
 
 	for {
 		// VK_SPACE is 0x20
@@ -181,11 +192,13 @@ func PickColorFromScreen(owner *walk.MainWindow) (color.Color, bool) {
 			g := uint8((c >> 8) & 0xFF)
 			b := uint8((c >> 16) & 0xFF)
 
+			dlg.Close(1)
 			return color.NRGBA{R: r, G: g, B: b, A: 255}, true
 		}
 
 		// Also allow escape to cancel (VK_ESCAPE is 0x1B)
 		if getAsyncKeyState(0x1B)&0x8000 != 0 {
+			dlg.Close(0)
 			return nil, false
 		}
 
@@ -216,24 +229,60 @@ func ShowColorPicker() (color.Color, bool) {
 }
 
 func ShowInstallerDialog() (string, error) {
-	textPtr, _ := syscall.UTF16PtrFromString("Программа recol.\nДа - Установить в контекстное меню\nНет - Удалить\nОтмена - Выход")
-	captionPtr, _ := syscall.UTF16PtrFromString("Установка / Удаление")
-	ret, _, _ := procMessageBoxW.Call(
-		0,
-		uintptr(unsafe.Pointer(textPtr)),
-		uintptr(unsafe.Pointer(captionPtr)),
-		uintptr(3|MB_ICONQUESTION),
-	)
-	if ret == 6 {
-		return "install", nil
-	} else if ret == 7 {
-		return "uninstall", nil
-	}
-	return "cancel", nil
+	var mw *walk.MainWindow
+	var action string = "cancel"
+
+	MainWindow{
+		AssignTo: &mw,
+		Title:    "Установка / Удаление recol",
+		MinSize:  Size{Width: 300, Height: 150},
+		Size:     Size{Width: 300, Height: 150},
+		Layout:   VBox{},
+		Children: []Widget{
+			Label{Text: "Добро пожаловать в recol.\nХотите установить или удалить интеграцию с контекстным меню Windows?"},
+			VSpacer{},
+			Composite{
+				Layout: HBox{},
+				Children: []Widget{
+					PushButton{
+						Text: "Установить",
+						OnClicked: func() {
+							action = "install"
+							mw.Close()
+						},
+					},
+					PushButton{
+						Text: "Удалить",
+						OnClicked: func() {
+							action = "uninstall"
+							mw.Close()
+						},
+					},
+					PushButton{
+						Text: "Отмена",
+						OnClicked: func() {
+							action = "cancel"
+							mw.Close()
+						},
+					},
+				},
+			},
+		},
+	}.Create()
+
+	mw.Run()
+	return action, nil
 }
 
 func ShowMessage(title, text string) {
-	textPtr, _ := syscall.UTF16PtrFromString(text)
-	captionPtr, _ := syscall.UTF16PtrFromString(title)
-	procMessageBoxW.Call(0, uintptr(unsafe.Pointer(textPtr)), uintptr(unsafe.Pointer(captionPtr)), 0)
+	// Create a temporary hidden main window to anchor the MsgBox
+	// because walk.MsgBox requires an owner, or it might not show correctly in windowsgui
+	var mw *walk.MainWindow
+	MainWindow{
+		AssignTo: &mw,
+		Visible:  false,
+	}.Create()
+
+	walk.MsgBox(mw, title, text, walk.MsgBoxIconInformation)
+	mw.Dispose()
 }
