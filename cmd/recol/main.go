@@ -6,97 +6,33 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"image/color"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
-	"unsafe"
+	"time"
 
+	"recol/pkg/guipkg"
 	"recol/pkg/imagepkg"
 	"recol/pkg/installpkg"
 )
 
-var (
-	comdlg32 = syscall.NewLazyDLL("comdlg32.dll")
-	procChooseColorW = comdlg32.NewProc("ChooseColorW")
-)
-
-const (
-	CC_RGBINIT = 0x00000001
-	CC_FULLOPEN = 0x00000002
-)
-
-type CHOOSECOLOR struct {
-	lStructSize    uint32
-	hwndOwner      uintptr
-	hInstance      uintptr
-	rgbResult      uint32
-	lpCustColors   *uint32
-	Flags          uint32
-	lCustData      uintptr
-	lpfnHook       uintptr
-	lpTemplateName *uint16
-}
-
-// ShowColorPicker opens the native Windows color picker dialog.
-// Returns the selected color and a boolean indicating if a color was chosen.
-func ShowColorPicker() (color.Color, bool) {
-	var customColors [16]uint32
-
-	cc := CHOOSECOLOR{
-		lStructSize: uint32(unsafe.Sizeof(CHOOSECOLOR{})),
-		Flags:       CC_RGBINIT | CC_FULLOPEN,
-		lpCustColors: &customColors[0],
-	}
-
-	ret, _, _ := procChooseColorW.Call(uintptr(unsafe.Pointer(&cc)))
-	if ret == 0 {
-		return nil, false // User canceled
-	}
-
-	// Windows color format is 0x00BBGGRR
-	r := uint8(cc.rgbResult & 0xFF)
-	g := uint8((cc.rgbResult >> 8) & 0xFF)
-	b := uint8((cc.rgbResult >> 16) & 0xFF)
-
-	return color.NRGBA{R: r, G: g, B: b, A: 255}, true
-}
-
 func handleInteractiveMenu() {
-	fmt.Println("=================================")
-	fmt.Println("          recol Setup            ")
-	fmt.Println("=================================")
-	fmt.Println("Please run this executable as Administrator to Install/Uninstall.")
-	fmt.Println()
-	fmt.Println("1. Install (Add to Context Menu)")
-	fmt.Println("2. Uninstall (Remove from Context Menu)")
-	fmt.Println("3. Exit")
-	fmt.Print("\nEnter choice (1/2/3): ")
-
-	reader := bufio.NewReader(os.Stdin)
-	choice, _ := reader.ReadString('\n')
-	choice = strings.TrimSpace(choice)
-
-	switch choice {
-	case "1":
-		fmt.Println("Installing...")
+	action, _ := guipkg.ShowInstallerDialog()
+	switch action {
+	case "install":
 		if err := installpkg.Install(); err != nil {
-			fmt.Printf("Error during installation: %v\n", err)
+			guipkg.ShowMessage("Ошибка установки", fmt.Sprintf("Ошибка: %v\nПопробуйте запустить от имени администратора.", err))
+		} else {
+			guipkg.ShowMessage("Установка", "Установка прошла успешно. Теперь вы можете использовать контекстное меню.")
 		}
-	case "2":
-		fmt.Println("Uninstalling...")
+	case "uninstall":
 		if err := installpkg.Uninstall(); err != nil {
-			fmt.Printf("Error during uninstallation: %v\n", err)
+			guipkg.ShowMessage("Ошибка удаления", fmt.Sprintf("Ошибка: %v\nПопробуйте запустить от имени администратора.", err))
+		} else {
+			guipkg.ShowMessage("Удаление", "Программа успешно удалена.")
 		}
-	case "3":
-		fmt.Println("Exiting.")
-	default:
-		fmt.Println("Invalid choice.")
 	}
-
-	fmt.Println("Press Enter to exit...")
-	reader.ReadString('\n')
 }
 
 func main() {
@@ -107,46 +43,105 @@ func main() {
 
 	targetPath := os.Args[1]
 
-	// Show color picker
-	targetColor, ok := ShowColorPicker()
-	if !ok {
-		fmt.Println("Canceled.")
-		return
-	}
+	// Multiple file selection workaround via local TCP socket
+	const port = "127.0.0.1:49193" // arbitrary unused port for IPC
 
-	// Process path
-	fileInfo, err := os.Stat(targetPath)
-	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		return
-	}
+	var listener net.Listener
+	var err error
 
-	if fileInfo.IsDir() {
-		err = filepath.Walk(targetPath, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-			if !info.IsDir() && imagepkg.IsSupported(path) {
-				fmt.Printf("Processing %s...\n", path)
-				if err := imagepkg.ProcessImage(path, targetColor); err != nil {
-					fmt.Printf("Failed to process %s: %v\n", path, err)
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			fmt.Printf("Error walking directory: %v\n", err)
+	// Try to listen or connect in a loop to handle the race condition of simultaneous launches
+	for i := 0; i < 5; i++ {
+		conn, errDial := net.DialTimeout("tcp", port, 50*time.Millisecond)
+		if errDial == nil {
+			// Server already running, send the path and exit
+			fmt.Fprintf(conn, "%s\n", targetPath)
+			conn.Close()
+			return
 		}
-	} else {
-		if imagepkg.IsSupported(targetPath) {
-			fmt.Printf("Processing %s...\n", targetPath)
-			if err := imagepkg.ProcessImage(targetPath, targetColor); err != nil {
-				fmt.Printf("Failed to process %s: %v\n", targetPath, err)
+
+		listener, err = net.Listen("tcp", port)
+		if err == nil {
+			break // Successfully became the server
+		}
+
+		// If both Dial and Listen failed, another instance is probably in the middle of binding.
+		// Wait a tiny bit and retry.
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if err != nil {
+		guipkg.ShowMessage("Ошибка IPC", fmt.Sprintf("Не удалось запустить процесс: %v", err))
+		return
+	}
+	defer listener.Close()
+
+	paths := []string{targetPath}
+
+	// Accept connections for a short window (e.g. 500ms) to collect paths from concurrent instances
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			reader := bufio.NewReader(conn)
+			path, _ := reader.ReadString('\n')
+			path = strings.TrimSpace(path)
+			if path != "" {
+				paths = append(paths, path)
+			}
+			conn.Close()
+		}
+	}()
+
+	// Wait a moment to ensure all instances of the context menu launch have had time to send paths
+	time.Sleep(500 * time.Millisecond)
+
+	// Stop listening for new ones
+	listener.Close()
+
+	// Ask user for color/mode once for all collected files
+	targetColor, mode, ok := guipkg.ShowMainDialog()
+	if !ok {
+		return
+	}
+
+	var errs []string
+
+	for _, path := range paths {
+		fileInfo, err := os.Stat(path)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("Ошибка: %v", err))
+			continue
+		}
+
+		if fileInfo.IsDir() {
+			err = filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
+				if err != nil {
+					return err
+				}
+				if !info.IsDir() && imagepkg.IsSupported(p) {
+					if err := imagepkg.ProcessImage(p, targetColor, mode); err != nil {
+						errs = append(errs, fmt.Sprintf("Не удалось обработать %s: %v", p, err))
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("Ошибка чтения папки: %v", err))
 			}
 		} else {
-			fmt.Println("Unsupported file type.")
+			if imagepkg.IsSupported(path) {
+				if err := imagepkg.ProcessImage(path, targetColor, mode); err != nil {
+					errs = append(errs, fmt.Sprintf("Не удалось обработать %s: %v", path, err))
+				}
+			} else {
+				errs = append(errs, fmt.Sprintf("Неподдерживаемый тип файла: %s", path))
+			}
 		}
 	}
 
-	fmt.Println("Done.")
+	if len(errs) > 0 {
+		guipkg.ShowMessage("Завершено с ошибками", strings.Join(errs, "\n"))
+	}
 }

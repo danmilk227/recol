@@ -13,7 +13,7 @@ import (
 )
 
 // ProcessImage loads an image, recolors it using targetColor, and saves it.
-func ProcessImage(filePath string, targetColor color.Color) error {
+func ProcessImage(filePath string, targetColor color.Color, mode string) error {
 	// Open the original file
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -35,7 +35,12 @@ func ProcessImage(filePath string, targetColor color.Color) error {
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			originalColor := img.At(x, y)
-			newColor := colorpkg.Recolor(originalColor, targetColor)
+			var newColor color.Color
+			if mode == "multiply" {
+				newColor = colorpkg.RecolorMultiply(originalColor, targetColor)
+			} else {
+				newColor = colorpkg.Recolor(originalColor, targetColor)
+			}
 			newImg.Set(x, y, newColor)
 		}
 	}

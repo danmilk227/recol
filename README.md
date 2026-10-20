@@ -29,8 +29,10 @@
 
 ## Сборка из исходников
 
-Для сборки требуется установленный Go.
+Для сборки требуется установленный Go и пакет `go-winres` (для иконок и манифеста Windows).
 
 ```sh
-GOOS=windows go build -o recol.exe ./cmd/recol
+go install github.com/tc-hib/go-winres@latest
+go-winres make
+GOOS=windows go build -ldflags="-H windowsgui -s -w" -o recol.exe ./cmd/recol
 ```
