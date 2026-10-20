@@ -8,29 +8,39 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
-
-	"github.com/lxn/walk"
-	. "github.com/lxn/walk/declarative"
-	"github.com/lxn/win"
 )
 
 var (
-	user32 = syscall.NewLazyDLL("user32.dll")
+	user32   = syscall.NewLazyDLL("user32.dll")
 	comdlg32 = syscall.NewLazyDLL("comdlg32.dll")
+	gdi32    = syscall.NewLazyDLL("gdi32.dll")
 
-	procMessageBoxW = user32.NewProc("MessageBoxW")
-	procChooseColorW = comdlg32.NewProc("ChooseColorW")
+	procMessageBoxW    = user32.NewProc("MessageBoxW")
+	procChooseColorW   = comdlg32.NewProc("ChooseColorW")
 	procGetAsyncKeyState = user32.NewProc("GetAsyncKeyState")
+	procGetCursorPos   = user32.NewProc("GetCursorPos")
+	procGetDC          = user32.NewProc("GetDC")
+	procReleaseDC      = user32.NewProc("ReleaseDC")
+	procGetPixel       = gdi32.NewProc("GetPixel")
 )
 
 const (
-	MB_YESNO = 0x00000004
+	MB_OK           = 0x00000000
+	MB_YESNO        = 0x00000004
 	MB_ICONQUESTION = 0x00000020
-	IDYES = 6
+	MB_ICONWARNING  = 0x00000030
+	MB_YESNOCANCEL  = 0x00000003
+	IDYES           = 6
+	IDNO            = 7
 
-	CC_RGBINIT = 0x00000001
+	CC_RGBINIT  = 0x00000001
 	CC_FULLOPEN = 0x00000002
 )
+
+type POINT struct {
+	X int32
+	Y int32
+}
 
 type CHOOSECOLOR struct {
 	lStructSize    uint32
@@ -49,164 +59,44 @@ func getAsyncKeyState(vKey int) uint16 {
 	return uint16(ret)
 }
 
-// ShowMainDialog opens a custom GUI using lxn/walk which looks native but allows
-// for more complex layouts like a color preview and mode selection.
-func ShowMainDialog() (color.Color, string, bool) {
-	var mw *walk.MainWindow
-	var colorPreview *walk.CustomWidget
-	var modeCombo *walk.ComboBox
-	var pickedColor color.Color = nil
-	var accepted bool = false
-
-	MainWindow{
-		AssignTo: &mw,
-		Title:    "Recolor",
-		MinSize:  Size{Width: 350, Height: 250},
-		Size:     Size{Width: 350, Height: 250},
-		Layout:   VBox{},
-		Children: []Widget{
-			Composite{
-				Layout: HBox{},
-				Children: []Widget{
-					Label{Text: "Выбранный цвет:"},
-					CustomWidget{
-						AssignTo: &colorPreview, // We'll re-assign this to a *walk.CustomWidget
-						MinSize: Size{Width: 50, Height: 20},
-						Paint: func(canvas *walk.Canvas, updateBounds walk.Rectangle) error {
-							if pickedColor == nil {
-								return nil
-							}
-							r, g, b, _ := pickedColor.RGBA()
-							brush, err := walk.NewSolidColorBrush(walk.RGB(byte(r>>8), byte(g>>8), byte(b>>8)))
-							if err != nil {
-								return err
-							}
-							defer brush.Dispose()
-							return canvas.FillRectangle(brush, updateBounds)
-						},
-					},
-				},
-			},
-			PushButton{
-				Text: "Выбрать цвет из палитры",
-				OnClicked: func() {
-					c, ok := ShowColorPicker()
-					if ok {
-						pickedColor = c
-						colorPreview.Invalidate()
-					}
-				},
-			},
-			PushButton{
-				Text: "Выбрать цвет пипеткой (с экрана)",
-				OnClicked: func() {
-					c, ok := PickColorFromScreen(mw)
-					if ok {
-						pickedColor = c
-						colorPreview.Invalidate()
-					}
-				},
-			},
-			Label{Text: "Режим наложения:"},
-			ComboBox{
-				AssignTo: &modeCombo,
-				Model:    []string{"Обычный (HSL)", "Умножение (с перекраской белого)"},
-				CurrentIndex: 0,
-			},
-			VSpacer{},
-			Composite{
-				Layout: HBox{},
-				Children: []Widget{
-					HSpacer{},
-					PushButton{
-						Text: "Применить",
-						OnClicked: func() {
-							if pickedColor != nil {
-								accepted = true
-								mw.Close()
-							} else {
-								walk.MsgBox(mw, "Ошибка", "Пожалуйста, выберите цвет", walk.MsgBoxIconWarning)
-							}
-						},
-					},
-					PushButton{
-						Text: "Отмена",
-						OnClicked: func() {
-							mw.Close()
-						},
-					},
-				},
-			},
-		},
-	}.Create()
-
-	mw.Run()
-
-	if !accepted || pickedColor == nil {
-		return nil, "", false
-	}
-
-	mode := "normal"
-	if modeCombo.CurrentIndex() == 1 {
-		mode = "multiply"
-	}
-
-	return pickedColor, mode, true
+// ShowMessage displays a simple native message box.
+func ShowMessage(title, text string) {
+	textPtr, _ := syscall.UTF16PtrFromString(text)
+	captionPtr, _ := syscall.UTF16PtrFromString(title)
+	procMessageBoxW.Call(0, uintptr(unsafe.Pointer(textPtr)), uintptr(unsafe.Pointer(captionPtr)), MB_OK)
 }
 
-// PickColorFromScreen enters a screen picking mode.
-func PickColorFromScreen(owner *walk.MainWindow) (color.Color, bool) {
-	// A quick hack for a color picker:
-	// We minimize the main window, wait a bit, then grab the cursor position and pixel color on left click.
-	// Implementing a full transparent overlay in WinAPI is complex.
-	// Instead, we will use a loop polling for GetAsyncKeyState.
-
-	// Create a non-blocking dialog to instruct the user
-	var dlg *walk.Dialog
-	Dialog{
-		AssignTo: &dlg,
-		Title:    "Пипетка",
-		MinSize:  Size{Width: 300, Height: 100},
-		Layout:   VBox{},
-		Children: []Widget{
-			Label{Text: "Наведите мышь на нужный пиксель на экране и нажмите ПРОБЕЛ.\nДля отмены нажмите ESC."},
-		},
-	}.Create(owner)
-	dlg.Show()
-
-	for {
-		// VK_SPACE is 0x20
-		if getAsyncKeyState(0x20)&0x8000 != 0 {
-			var pt win.POINT
-			win.GetCursorPos(&pt)
-
-			hdc := win.GetDC(0)
-			if hdc == 0 {
-				return nil, false
-			}
-
-			c := win.GetPixel(hdc, pt.X, pt.Y)
-			win.ReleaseDC(0, hdc)
-
-			r := uint8(c & 0xFF)
-			g := uint8((c >> 8) & 0xFF)
-			b := uint8((c >> 16) & 0xFF)
-
-			dlg.Close(1)
-			return color.NRGBA{R: r, G: g, B: b, A: 255}, true
-		}
-
-		// Also allow escape to cancel (VK_ESCAPE is 0x1B)
-		if getAsyncKeyState(0x1B)&0x8000 != 0 {
-			dlg.Close(0)
-			return nil, false
-		}
-
-		time.Sleep(10 * time.Millisecond)
+// ShowInstallerDialog asks the user whether to install or uninstall.
+func ShowInstallerDialog() (string, error) {
+	textPtr, _ := syscall.UTF16PtrFromString("Программа recol.\nДа - Установить в контекстное меню\nНет - Удалить\nОтмена - Выход")
+	captionPtr, _ := syscall.UTF16PtrFromString("Установка / Удаление recol")
+	ret, _, _ := procMessageBoxW.Call(
+		0,
+		uintptr(unsafe.Pointer(textPtr)),
+		uintptr(unsafe.Pointer(captionPtr)),
+		uintptr(MB_YESNOCANCEL|MB_ICONQUESTION),
+	)
+	if ret == IDYES {
+		return "install", nil
+	} else if ret == IDNO {
+		return "uninstall", nil
 	}
+	return "cancel", nil
 }
 
-// Ensure the old functions are still here for compatibility if needed.
+// askYesNo presents a yes/no dialog and returns true if YES.
+func askYesNo(title, text string) bool {
+	textPtr, _ := syscall.UTF16PtrFromString(text)
+	captionPtr, _ := syscall.UTF16PtrFromString(title)
+	ret, _, _ := procMessageBoxW.Call(
+		0,
+		uintptr(unsafe.Pointer(textPtr)),
+		uintptr(unsafe.Pointer(captionPtr)),
+		uintptr(MB_YESNO|MB_ICONQUESTION),
+	)
+	return ret == IDYES
+}
+
 // ShowColorPicker opens the native Windows color picker dialog.
 func ShowColorPicker() (color.Color, bool) {
 	var customColors [16]uint32
@@ -228,61 +118,62 @@ func ShowColorPicker() (color.Color, bool) {
 	return color.NRGBA{R: r, G: g, B: b, A: 255}, true
 }
 
-func ShowInstallerDialog() (string, error) {
-	var mw *walk.MainWindow
-	var action string = "cancel"
+// PickColorFromScreen waits for the user to press SPACE to pick a color from the screen.
+func PickColorFromScreen() (color.Color, bool) {
+	ShowMessage("Пипетка", "Наведите мышь на нужный пиксель на экране и нажмите ПРОБЕЛ.\nДля отмены нажмите ESC.")
 
-	MainWindow{
-		AssignTo: &mw,
-		Title:    "Установка / Удаление recol",
-		MinSize:  Size{Width: 300, Height: 150},
-		Size:     Size{Width: 300, Height: 150},
-		Layout:   VBox{},
-		Children: []Widget{
-			Label{Text: "Добро пожаловать в recol.\nХотите установить или удалить интеграцию с контекстным меню Windows?"},
-			VSpacer{},
-			Composite{
-				Layout: HBox{},
-				Children: []Widget{
-					PushButton{
-						Text: "Установить",
-						OnClicked: func() {
-							action = "install"
-							mw.Close()
-						},
-					},
-					PushButton{
-						Text: "Удалить",
-						OnClicked: func() {
-							action = "uninstall"
-							mw.Close()
-						},
-					},
-					PushButton{
-						Text: "Отмена",
-						OnClicked: func() {
-							action = "cancel"
-							mw.Close()
-						},
-					},
-				},
-			},
-		},
-	}.Create()
+	for {
+		// VK_SPACE
+		if getAsyncKeyState(0x20)&0x8000 != 0 {
+			var pt POINT
+			procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
 
-	mw.Run()
-	return action, nil
+			hdc, _, _ := procGetDC.Call(0)
+			if hdc == 0 {
+				return nil, false
+			}
+
+			c, _, _ := procGetPixel.Call(hdc, uintptr(pt.X), uintptr(pt.Y))
+			procReleaseDC.Call(0, hdc)
+
+			r := uint8(c & 0xFF)
+			g := uint8((c >> 8) & 0xFF)
+			b := uint8((c >> 16) & 0xFF)
+
+			return color.NRGBA{R: r, G: g, B: b, A: 255}, true
+		}
+
+		// VK_ESCAPE
+		if getAsyncKeyState(0x1B)&0x8000 != 0 {
+			return nil, false
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
-func ShowMessage(title, text string) {
-	// Create a temporary hidden main window to anchor the MsgBox
-	// because walk.MsgBox requires an owner, or it might not show correctly in windowsgui
-	var mw *walk.MainWindow
-	MainWindow{
-		AssignTo: &mw,
-		Visible:  false,
-	}.Create()
+// ShowMainDialog sequences the configuration through standard WinAPI dialogs.
+func ShowMainDialog() (color.Color, string, bool) {
+	var targetColor color.Color
+	var ok bool
 
-	walk.MsgBox(mw, title, text, walk.MsgBoxIconInformation)
-	mw.Dispose()
+	usePipette := askYesNo("Выбор цвета", "Использовать пипетку с экрана?\n(Нажмите Нет, чтобы открыть стандартную палитру)")
+
+	if usePipette {
+		targetColor, ok = PickColorFromScreen()
+	} else {
+		targetColor, ok = ShowColorPicker()
+	}
+
+	if !ok || targetColor == nil {
+		return nil, "", false
+	}
+
+	mode := "normal"
+	useMultiply := askYesNo("Режим наложения", "Использовать режим 'Умножение'?\n(Да - перекрашивать белый цвет)\n(Нет - Обычный HSL режим)")
+	if useMultiply {
+		mode = "multiply"
+	}
+
+	return targetColor, mode, true
 }
