@@ -101,8 +101,8 @@ func main() {
 	// Stop listening for new ones
 	listener.Close()
 
-	// Ask user for color/mode once for all collected files
-	targetColor, mode, ok := guipkg.ShowMainDialog()
+	// Get configuration from context menu args
+	targetColor, mode, ok := guipkg.GetConfigFromArgs(os.Args)
 	if !ok {
 		return
 	}

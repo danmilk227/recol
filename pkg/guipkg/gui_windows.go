@@ -152,14 +152,19 @@ func PickColorFromScreen() (color.Color, bool) {
 	}
 }
 
-// ShowMainDialog sequences the configuration through standard WinAPI dialogs.
-func ShowMainDialog() (color.Color, string, bool) {
+// GetConfigFromArgs evaluates the command line arguments provided by the Context Menu.
+func GetConfigFromArgs(args []string) (color.Color, string, bool) {
+	if len(args) < 4 {
+		return nil, "", false
+	}
+
+	toolType := args[2] // "palette" or "pipette"
+	mode := args[3]     // "normal" or "multiply"
+
 	var targetColor color.Color
 	var ok bool
 
-	usePipette := askYesNo("Выбор цвета", "Использовать пипетку с экрана?\n(Нажмите Нет, чтобы открыть стандартную палитру)")
-
-	if usePipette {
+	if toolType == "pipette" {
 		targetColor, ok = PickColorFromScreen()
 	} else {
 		targetColor, ok = ShowColorPicker()
@@ -167,12 +172,6 @@ func ShowMainDialog() (color.Color, string, bool) {
 
 	if !ok || targetColor == nil {
 		return nil, "", false
-	}
-
-	mode := "normal"
-	useMultiply := askYesNo("Режим наложения", "Использовать режим 'Умножение'?\n(Да - перекрашивать белый цвет)\n(Нет - Обычный HSL режим)")
-	if useMultiply {
-		mode = "multiply"
 	}
 
 	return targetColor, mode, true

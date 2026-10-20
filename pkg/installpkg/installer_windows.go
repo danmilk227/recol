@@ -104,8 +104,6 @@ func copyFile(src, dst string) error {
 }
 
 func setupRegistry(exePath string) error {
-	// Create common shell command
-	cmdValue := fmt.Sprintf("\"%s\" \"%%1\"", exePath)
 	iconValue := fmt.Sprintf("\"%s\"", exePath)
 
 	paths := []string{
@@ -115,22 +113,52 @@ func setupRegistry(exePath string) error {
 		`SystemFileAssociations\.jpeg\shell\Recolor`,
 	}
 
+	type SubCommand struct {
+		Name  string
+		Title string
+		Args  string
+	}
+
+	subCommands := []SubCommand{
+		{Name: "cmd1", Title: "Обычный (выбрать из палитры)", Args: "palette normal"},
+		{Name: "cmd2", Title: "Умножение (выбрать из палитры)", Args: "palette multiply"},
+		{Name: "cmd3", Title: "Обычный (взять пипеткой)", Args: "pipette normal"},
+		{Name: "cmd4", Title: "Умножение (взять пипеткой)", Args: "pipette multiply"},
+	}
+
 	for _, p := range paths {
 		k, _, err := registry.CreateKey(registry.CLASSES_ROOT, p, registry.ALL_ACCESS)
 		if err != nil {
 			return err
 		}
-		k.SetStringValue("", "Recolor (recol)")
+
+		k.SetStringValue("MUIVerb", "Recolor")
+		k.SetStringValue("SubCommands", "")
 		k.SetStringValue("Icon", iconValue)
 
-		cmdKey, _, err := registry.CreateKey(k, "command", registry.ALL_ACCESS)
+		shellKey, _, err := registry.CreateKey(k, "shell", registry.ALL_ACCESS)
 		if err != nil {
 			k.Close()
 			return err
 		}
-		cmdKey.SetStringValue("", cmdValue)
 
-		cmdKey.Close()
+		for _, sc := range subCommands {
+			scKey, _, err := registry.CreateKey(shellKey, sc.Name, registry.ALL_ACCESS)
+			if err == nil {
+				scKey.SetStringValue("MUIVerb", sc.Title)
+				scKey.SetStringValue("Icon", iconValue)
+
+				cmdKey, _, err := registry.CreateKey(scKey, "command", registry.ALL_ACCESS)
+				if err == nil {
+					cmdValue := fmt.Sprintf("\"%s\" \"%%1\" %s", exePath, sc.Args)
+					cmdKey.SetStringValue("", cmdValue)
+					cmdKey.Close()
+				}
+				scKey.Close()
+			}
+		}
+
+		shellKey.Close()
 		k.Close()
 	}
 
@@ -146,8 +174,15 @@ func removeRegistry() {
 	}
 
 	for _, p := range paths {
-		// Attempt to delete command subkey first
-		registry.DeleteKey(registry.CLASSES_ROOT, p+`\command`)
+		// Attempt to delete subkeys recursively
+		shellPath := p + `\shell`
+
+		cmds := []string{"cmd1", "cmd2", "cmd3", "cmd4"}
+		for _, c := range cmds {
+			registry.DeleteKey(registry.CLASSES_ROOT, shellPath+`\`+c+`\command`)
+			registry.DeleteKey(registry.CLASSES_ROOT, shellPath+`\`+c)
+		}
+		registry.DeleteKey(registry.CLASSES_ROOT, shellPath)
 		registry.DeleteKey(registry.CLASSES_ROOT, p)
 	}
 }
